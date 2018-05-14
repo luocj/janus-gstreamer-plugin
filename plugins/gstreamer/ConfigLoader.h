@@ -12,5 +12,4 @@ class MountPoint; // #include "MountPoint.h"
 void LoadConfig(
     janus_callbacks* janus,
     janus_plugin* janusPlugin,
-    const std::string& configFile,
-    std::map<int, MountPoint>* mountPoints);
+    const std::string& configFile);

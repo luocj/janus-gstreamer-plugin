@@ -29,6 +29,7 @@ namespace
 
 enum {
     PLUGIN_VERSION = 1,
+    MAX_MOUNTPOINTS_COUNT = 5,
 };
 
 enum {
@@ -38,7 +39,6 @@ enum {
 enum class Request
 {
     Invalid,
-    List,
     Watch,
     Start,
     Stop,
@@ -54,7 +54,7 @@ struct PluginContext
     QueueSourcePtr queueSourcePtr;
     std::thread mainThread;
 
-    std::map<int, MountPoint> mountPoints;
+    std::map<std::string, MountPoint> mountPoints;
 };
 
 // FIXME! add ability send different meessage structs
@@ -180,9 +180,7 @@ static Request ParseRequest(const json_t* message)
     if(!strRequest) {
         JANUS_LOG(LOG_ERR, "%s: no request\n", PluginName);
         return Request::Invalid;
-    } else if(0 == strcasecmp(strRequest, "list"))
-        return Request::List;
-    else if(0 == strcasecmp(strRequest, "watch"))
+    } else if(0 == strcasecmp(strRequest, "watch"))
         return Request::Watch;
     else if(0 == strcasecmp(strRequest, "start"))
         return Request::Start;
@@ -212,14 +210,37 @@ static void HandleWatchMessage(
         return;
     }
 
-    json_int_t id = -1;
-    if(json_t* jsonId = json_object_get(message.get(), "id"))
-        id = json_integer_value(jsonId);
+    std::string mrl;
+    if(json_t* jsonMrl = json_object_get(message.get(), "mrl"))
+        mrl = json_string_value(jsonMrl);
 
-    auto it = context.mountPoints.find(id);
-    if(context.mountPoints.end() == it) {
-        JANUS_LOG(LOG_ERR, "%s: unknown mount point id \"%lld\"\n", PluginName, id);
+    if(mrl.empty()) {
+        JANUS_LOG(LOG_ERR, "%s: empty mrl\n", PluginName);
+        // FIXME! send error event back
         return;
+    }
+
+    auto it = context.mountPoints.find(mrl);
+    if(context.mountPoints.end() == it) {
+        if(context.mountPoints.size() < MAX_MOUNTPOINTS_COUNT) {
+            it =
+                context.mountPoints.emplace(
+                    std::piecewise_construct,
+                    std::make_tuple(mrl),
+                    std::make_tuple(
+                        context.janus, &context.janusPlugin,
+                        mrl,
+                        MountPoint::RESTREAM_BOTH)
+                    ).first;
+        } else {
+            PushError(
+                context.janus,
+                &context.janusPlugin,
+                janusSession,
+                transaction,
+                "maximum simultaneous streaming sources count is reached");
+            return;
+        }
     }
 
     assert(!session->sdpSessionId);
@@ -277,6 +298,9 @@ static void HandleDestroyMessage(janus_plugin_session* janusSession)
 
     if(session->watching) {
         session->watching->removeWatcher(janusSession);
+        if(!session->watching->isUsed())
+            Context().mountPoints.erase(session->watching->mrl());
+
         session->watching = nullptr;
     }
 
@@ -308,9 +332,6 @@ static void HandlePluginMessage(const std::unique_ptr<QueueItem>& item, gpointer
         break;
     case Request::Invalid:
         JANUS_LOG(LOG_DBG, "%s: HandlePluginMessage. Request::Invalid\n", PluginName);
-        break;
-    case Request::List:
-        JANUS_LOG(LOG_ERR, "%s: HandlePluginMessage. Request::List is unexpected\n", PluginName);
         break;
     default:
         JANUS_LOG(LOG_ERR, "%s: HandlePluginMessage. Unknown request\n", PluginName);
@@ -381,8 +402,7 @@ static int Init(janus_callbacks* callback, const char* configPath)
 
     LoadConfig(
         context.janus, &context.janusPlugin,
-        std::string(configPath) + "/" + PluginPackage + ".jcfg",
-        &context.mountPoints);
+        std::string(configPath) + "/" + PluginPackage + ".jcfg");
 
     InitPluginMain();
 
@@ -421,34 +441,6 @@ static janus_plugin_result* InvalidJson(const char* errorText)
             static_cast<janus_plugin_result_type>(INVALID_JSON_ERROR), errorText, nullptr);
 }
 
-static struct janus_plugin_result* HandleList()
-{
-    PluginContext& context = Context();
-
-    JsonPtr listPtr(json_array());
-    json_t* list = listPtr.get();
-
-    for(auto& pair: context.mountPoints) {
-        JsonPtr listItemPtr(json_object());
-        json_t* listItem = listItemPtr.get();
-
-        json_object_set_new(listItem, "id", json_integer(pair.first));
-        json_object_set_new(listItem, "description", json_string(pair.second.mrl().c_str()));
-        json_object_set_new(listItem, "type", json_string("live"));
-        json_array_append_new(list, listItemPtr.release());
-    }
-
-    JsonPtr responsePtr(json_object());
-    json_t* response = responsePtr.get();
-
-    json_object_set_new(response, "streaming", json_string("list"));
-    json_object_set_new(response, "list", listPtr.release());
-
-    return
-        janus_plugin_result_new(
-            JANUS_PLUGIN_OK, nullptr, responsePtr.release());
-}
-
 struct janus_plugin_result* HandleMessage(
     janus_plugin_session* janusSession,
     char* transaction,
@@ -477,9 +469,6 @@ struct janus_plugin_result* HandleMessage(
     case Request::Invalid:
         JANUS_LOG(LOG_ERR, "%s: Request::Invalid\n", PluginName);
         return InvalidJson("JSON error: invalid request\n");
-    case Request::List:
-        JANUS_LOG(LOG_DBG, "%s: Request::List\n", PluginName);
-        return HandleList();
     case Request::Watch:
         JANUS_LOG(LOG_DBG, "%s: Request::Watch\n", PluginName);
 
