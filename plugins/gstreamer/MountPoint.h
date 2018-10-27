@@ -25,6 +25,7 @@ public:
         const std::string& description);
 
     const std::string& description() const;
+    const std::string& mrl() const;
 
     bool isUsed() const;
 
@@ -70,8 +71,6 @@ private:
 
         std::deque<JanusPluginSessionPtr> listiners;
     };
-
-    const std::string& mrl() const;
 
     const Media* media() const;
 
